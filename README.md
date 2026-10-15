@@ -1,6 +1,6 @@
 # rag-retrieval-lab
 
-**rag-retrieval-lab is a hands-on laboratory for two-stage retrieval in RAG systems: stage 1 runs hybrid BM25+dense search fused with Reciprocal Rank Fusion, stage 2 applies cross-encoder reranking, and every experiment is benchmarked with recall/MRR/nDCG so you can compare chunking strategies, fusion methods, and retriever configurations on real numbers.**
+**rag-retrieval-lab is a hands-on laboratory for two-stage retrieval in RAG systems: stage 1 runs hybrid BM25+dense search fused with Reciprocal Rank Fusion, stage 2 applies cross-encoder reranking, and every experiment is benchmarked with recall/MRR/nDCG so you can compare chunking strategies, fusion methods, and retriever configurations on real numbers — including a real-world case study on CVE retrieval over public NVD data.**
 
 [![CI](https://github.com/Naeemeh146/rag-retrieval-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/Naeemeh146/rag-retrieval-lab/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -95,6 +95,32 @@ Takeaways (corpus-specific, not universal truths):
   harness is deterministic.
 
 Reproduce with `make eval`; results land in `results/results.{json,csv}`.
+
+## Case study: CVE retrieval
+
+Beyond the synthetic corpus, the lab ships a real-world case study:
+**2,995 recent CVEs from the public NVD feed**, evaluated on 13 queries
+with exact ground truth — 10 product queries (`"vulnerabilities affecting
+<vendor> <product>"`, qrels derived from CPE data) plus 3 natural-language
+vulnerability-class queries.
+
+Headline numbers (`retrieval-lab evaluate --dataset cve`):
+
+| config | recall@10 | mrr@10 | ndcg@10 |
+|---|---|---|---|
+| BM25 | **0.2412** | **1.0000** | **0.9641** |
+| dense (sentence-transformer) | 0.1928 | 0.9359 | 0.8157 |
+| hybrid (RRF) | 0.2212 | 1.0000 | 0.9147 |
+| hybrid + cross-encoder rerank | 0.2334 | 1.0000 | 0.9408 |
+
+The honest story: BM25 dominates because CVE text names products verbatim —
+and dense retrieval *fails instructively* on generic product terms
+(`microsoft windows`: 3/10 vs BM25's 10/10). Reranking trades a little
+recall@5 for better nDCG@10. Full write-up with per-query breakdowns:
+[docs/case-study-cve.md](docs/case-study-cve.md).
+
+Reproduce: `retrieval-lab download-cve --out data` (public NVD API, no key),
+then evaluate with `configs/cve-*.yaml`.
 
 ## Configuration guide
 

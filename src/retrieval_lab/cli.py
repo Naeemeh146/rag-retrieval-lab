@@ -7,7 +7,7 @@ from typing import Annotated
 
 import typer
 
-from retrieval_lab.datasets import download_scifact, load_dataset
+from retrieval_lab.datasets import download_cve_dataset, download_scifact, load_dataset
 from retrieval_lab.evaluate import evaluate_dataset
 from retrieval_lab.pipeline import RetrieverConfig, TwoStageRetriever
 
@@ -29,12 +29,26 @@ def download_data(
     )
 
 
+@app.command("download-cve")
+def download_cve(
+    out: Annotated[Path, typer.Option(help="Cache directory for datasets.")] = Path("data"),
+    max_cves: Annotated[int, typer.Option(help="Upper bound on CVE records.")] = 3000,
+) -> None:
+    """Download recent NVD CVEs (public data, no API key; rate-limited)."""
+    dataset = download_cve_dataset(out, max_cves=max_cves)
+    typer.echo(
+        f"Downloaded {dataset.name}: {len(dataset.documents)} docs, "
+        f"{len(dataset.queries)} queries, {len(dataset.qrels)} qrels "
+        f"-> {out.resolve()}"
+    )
+
+
 @app.command()
 def ingest(
     config: Annotated[Path, typer.Option(help="Retriever YAML config.")] = Path(
         "configs/hybrid.yaml"
     ),
-    dataset: Annotated[str, typer.Option(help="'synthetic' or 'scifact'.")] = "synthetic",
+    dataset: Annotated[str, typer.Option(help="'synthetic', 'scifact', or 'cve'.")] = ("synthetic"),
     data_dir: Annotated[Path, typer.Option(help="Dataset cache directory.")] = Path("data"),
     out: Annotated[Path, typer.Option(help="Index output directory.")] = Path("data/index"),
 ) -> None:
@@ -67,7 +81,7 @@ def evaluate(
     configs: Annotated[
         list[Path] | None, typer.Option(help="Experiment YAML configs (repeatable).")
     ] = None,
-    dataset: Annotated[str, typer.Option(help="'synthetic' or 'scifact'.")] = "synthetic",
+    dataset: Annotated[str, typer.Option(help="'synthetic', 'scifact', or 'cve'.")] = ("synthetic"),
     data_dir: Annotated[Path, typer.Option(help="Dataset cache directory.")] = Path("data"),
     out: Annotated[Path, typer.Option(help="Results directory.")] = Path("results"),
 ) -> None:

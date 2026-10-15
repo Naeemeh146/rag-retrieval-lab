@@ -1,10 +1,11 @@
-"""Dataset loading: built-in synthetic corpus and BEIR SciFact downloader."""
+"""Dataset loading: built-in synthetic corpus, BEIR SciFact, and NVD CVE downloads."""
 
 from __future__ import annotations
 
 import csv
 import io
 import json
+import urllib.parse
 import urllib.request
 import zipfile
 from dataclasses import dataclass, field
@@ -278,13 +279,14 @@ def load_dataset(name: str, data_dir: str | Path = "data") -> RetrievalDataset:
     """Load a dataset by name.
 
     Args:
-        name: ``"synthetic"`` for the built-in offline corpus or
-            ``"scifact"`` for the cached BEIR download.
+        name: ``"synthetic"`` for the built-in offline corpus,
+            ``"scifact"`` for the cached BEIR download, or ``"cve"``
+            for the cached NVD CVE corpus.
         data_dir: Cache directory for downloaded datasets.
 
     Raises:
         ValueError: If ``name`` is unknown.
-        FileNotFoundError: If ``"scifact"`` was never downloaded.
+        FileNotFoundError: If ``"scifact"`` or ``"cve"`` was never downloaded.
     """
     normalized = name.lower()
     if normalized == "synthetic":
@@ -296,4 +298,306 @@ def load_dataset(name: str, data_dir: str | Path = "data") -> RetrievalDataset:
                 f"SciFact cache not found at {cache_path}. Run `retrieval-lab download-data` first."
             )
         return _dataset_from_json(json.loads(cache_path.read_text()))
-    raise ValueError(f"Unknown dataset {name!r}; expected 'synthetic' or 'scifact'")
+    if normalized == "cve":
+        return load_cve_corpus(data_dir)
+    raise ValueError(f"Unknown dataset {name!r}; expected 'synthetic', 'scifact', or 'cve'")
+
+
+# ---------------------------------------------------------------------------
+# NVD CVE corpus (public data only — https://nvd.nist.gov)
+# ---------------------------------------------------------------------------
+
+NVD_API_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+NVD_RESULTS_PER_PAGE = 2000
+# Unauthenticated NVD API 2.0 limit: 5 requests per rolling 30 seconds.
+NVD_REQUEST_DELAY_SECONDS = 7.0
+
+# Natural-language probe queries. Each pairs a query with the exact substring
+# rule used to build its qrels, so relevance is deterministic and defensible.
+CVE_NL_QUERIES: list[tuple[str, str, str]] = [
+    ("nl-buffer-overflow", "buffer overflow vulnerabilities", "buffer overflow"),
+    ("nl-sql-injection", "SQL injection vulnerabilities", "sql injection"),
+    (
+        "nl-xss",
+        "cross-site scripting (XSS) vulnerabilities",
+        "cross-site scripting",
+    ),
+]
+
+
+def _nvd_get(params: dict[str, str], delay: float = NVD_REQUEST_DELAY_SECONDS) -> dict:
+    """GET one NVD API 2.0 page, raising on HTTP errors.
+
+    Args:
+        params: Query parameters for the request.
+        delay: Seconds to wait before the request (rate-limit courtesy).
+    """
+    import time
+
+    time.sleep(delay)
+    query = urllib.parse.urlencode(params)
+    request = urllib.request.Request(
+        f"{NVD_API_URL}?{query}",
+        headers={"User-Agent": "rag-retrieval-lab/0.1.0"},
+    )
+    with urllib.request.urlopen(request, timeout=120) as response:
+        payload: dict = json.loads(response.read().decode("utf-8"))
+        return payload
+
+
+def download_nvd_pages(
+    data_dir: str | Path,
+    max_cves: int = 3000,
+    pub_start: str = "2026-07-01T00:00:00.000",
+    pub_end: str = "2026-10-15T00:00:00.000",
+) -> list[dict]:
+    """Download raw NVD CVE records with resumable per-page caching.
+
+    Pages are cached under ``<data_dir>/nvd-pages/page-<startIndex>.json`` so
+    an interrupted download resumes without re-requesting finished pages.
+
+    Args:
+        data_dir: Cache directory.
+        max_cves: Upper bound on CVE records to fetch.
+        pub_start: NVD ``pubStartDate`` (ISO-8601). Must be within 120 days
+            of ``pub_end`` (NVD API limit).
+        pub_end: NVD ``pubEndDate`` (ISO-8601).
+
+    Returns:
+        Raw ``vulnerabilities`` entries from the NVD API.
+
+    Raises:
+        ValueError: If the date range exceeds NVD's 120-day limit.
+    """
+    from datetime import datetime
+
+    start = datetime.fromisoformat(pub_start.replace("Z", "+00:00"))
+    end = datetime.fromisoformat(pub_end.replace("Z", "+00:00"))
+    if (end - start).days > 120:
+        raise ValueError("NVD API 2.0 limits pubStartDate/pubEndDate to a 120-day range")
+    data_dir = Path(data_dir)
+    pages_dir = data_dir / "nvd-pages"
+    pages_dir.mkdir(parents=True, exist_ok=True)
+
+    records: list[dict] = []
+    start_index = 0
+    total_results: int | None = None
+    first_request = True
+    while len(records) < max_cves:
+        page_path = pages_dir / f"page-{start_index}.json"
+        if page_path.exists():
+            page = json.loads(page_path.read_text())
+        else:
+            page = _nvd_get(
+                {
+                    "pubStartDate": pub_start,
+                    "pubEndDate": pub_end,
+                    "resultsPerPage": str(NVD_RESULTS_PER_PAGE),
+                    "startIndex": str(start_index),
+                },
+                delay=0.0 if first_request else NVD_REQUEST_DELAY_SECONDS,
+            )
+            page_path.write_text(json.dumps(page))
+        first_request = False
+        if total_results is None:
+            total_results = int(page.get("totalResults", 0))
+        batch = page.get("vulnerabilities", [])
+        if not batch:
+            break
+        records.extend(batch)
+        start_index += len(batch)
+        if total_results is not None and start_index >= total_results:
+            break
+    return records[:max_cves]
+
+
+def parse_cpe(criteria: str) -> tuple[str, str] | None:
+    """Extract ``(vendor, product)`` from a CPE 2.3 string.
+
+    Args:
+        criteria: e.g. ``cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*``.
+
+    Returns:
+        Lower-cased ``(vendor, product)`` or ``None`` if unparsable.
+    """
+    parts = criteria.split(":")
+    if len(parts) < 5 or parts[0] != "cpe" or parts[1] != "2.3":
+        return None
+    vendor, product = parts[3].strip().lower(), parts[4].strip().lower()
+    if not vendor or not product or vendor == "*" or product == "*":
+        return None
+    return (vendor, product)
+
+
+def _cve_products(cve: dict) -> list[tuple[str, str]]:
+    """Collect normalized ``(vendor, product)`` pairs from a CVE's CPE matches."""
+    products: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for node in cve.get("configurations", []) or []:
+        for match in node.get("nodes", []) or []:
+            for cpe in match.get("cpeMatch", []) or []:
+                parsed = parse_cpe(cpe.get("criteria", ""))
+                if parsed and parsed not in seen:
+                    seen.add(parsed)
+                    products.append(parsed)
+    return products
+
+
+def _cve_english_description(cve: dict) -> str | None:
+    """Return the English description, or ``None`` for rejected/undescribed CVEs."""
+    for desc in cve.get("descriptions", []) or []:
+        if desc.get("lang") == "en":
+            raw = desc.get("value", "")
+            value = raw.strip() if isinstance(raw, str) else ""
+            if value and "** REJECT **" not in value:
+                return value
+    return None
+
+
+def _cve_severity(cve: dict) -> str:
+    """Best-effort CVSS base severity label, else ``""``."""
+    for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+        for metric in (cve.get("metrics", {}) or {}).get(key, []) or []:
+            data = metric.get("cvssData", {})
+            if data.get("baseSeverity"):
+                return f"{data['baseSeverity']} ({data.get('baseScore', '?')})"
+    return ""
+
+
+def cve_to_document(cve: dict) -> tuple[Document, list[tuple[str, str]]] | None:
+    """Convert one NVD ``cve`` object to a corpus document.
+
+    Returns:
+        ``(Document, products)`` or ``None`` when the CVE has no usable
+        English description.
+    """
+    cve_id = cve.get("id", "")
+    description = _cve_english_description(cve)
+    if not cve_id or not description:
+        return None
+    products = _cve_products(cve)
+    parts = [f"{cve_id}.", description]
+    if products:
+        affected = ", ".join(f"{vendor} {product}" for vendor, product in products[:8])
+        parts.append(f"Affected products: {affected}.")
+    severity = _cve_severity(cve)
+    if severity:
+        parts.append(f"Severity: {severity}.")
+    return (Document(doc_id=cve_id, text=" ".join(parts)), products)
+
+
+def build_cve_dataset(
+    records: list[dict],
+    top_products: int = 10,
+    max_queries: int = 20,
+) -> RetrievalDataset:
+    """Build an evaluation dataset from raw NVD ``vulnerabilities`` records.
+
+    Product queries take the form ``"vulnerabilities affecting <vendor>
+    <product>"`` for the most-affected products; their qrels are exact by
+    construction (derived from the same CPE data as the documents).
+    Additional natural-language queries use explicit substring rules
+    (see :data:`CVE_NL_QUERIES`) so their qrels are deterministic.
+
+    Args:
+        records: Raw ``vulnerabilities`` entries from the NVD API.
+        top_products: How many top products become queries.
+        max_queries: Cap on total queries (product + NL).
+
+    Returns:
+        A :class:`RetrievalDataset` named ``"cve"``.
+    """
+    documents: list[Document] = []
+    doc_products: dict[str, list[tuple[str, str]]] = {}
+    for record in records:
+        parsed = cve_to_document(record.get("cve", {}))
+        if parsed is None:
+            continue
+        document, products = parsed
+        documents.append(document)
+        doc_products[document.doc_id] = products
+
+    queries: list[Query] = []
+    qrels: dict[str, set[str]] = {}
+
+    # Product queries: exact qrels from CPE data.
+    product_counts: dict[tuple[str, str], int] = {}
+    product_docs: dict[tuple[str, str], set[str]] = {}
+    for doc_id, products in doc_products.items():
+        for product in products:
+            product_counts[product] = product_counts.get(product, 0) + 1
+            product_docs.setdefault(product, set()).add(doc_id)
+    ranked = sorted(product_counts.items(), key=lambda item: (-item[1], item[0]))
+    for (vendor, product_name), _count in ranked[:top_products]:
+        query_id = f"product-{vendor}-{product_name}".replace(" ", "-")
+        queries.append(
+            Query(
+                query_id=query_id,
+                text=f"vulnerabilities affecting {vendor} {product_name}",
+            )
+        )
+        qrels[query_id] = set(product_docs[(vendor, product_name)])
+        if len(queries) >= max_queries:
+            break
+
+    # Natural-language queries with explicit substring rules.
+    descriptions = {document.doc_id: document.text.lower() for document in documents}
+    for query_id, text, phrase in CVE_NL_QUERIES:
+        if len(queries) >= max_queries:
+            break
+        matched = {doc_id for doc_id, lowered in descriptions.items() if phrase in lowered}
+        if len(matched) >= 3:
+            queries.append(Query(query_id=query_id, text=text))
+            qrels[query_id] = matched
+
+    return RetrievalDataset(name="cve", documents=documents, queries=queries, qrels=qrels)
+
+
+def download_cve_dataset(
+    data_dir: str | Path = "data",
+    max_cves: int = 3000,
+) -> RetrievalDataset:
+    """Download recent NVD CVEs and cache the parsed evaluation dataset.
+
+    Writes the parsed dataset to ``<data_dir>/nvd.json`` (gitignored);
+    raw pages are cached under ``<data_dir>/nvd-pages/`` for resumability.
+
+    Args:
+        data_dir: Cache directory.
+        max_cves: Upper bound on CVE records to fetch.
+
+    Returns:
+        The parsed CVE :class:`RetrievalDataset`.
+    """
+    data_dir = Path(data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    records = download_nvd_pages(data_dir, max_cves=max_cves)
+    dataset = build_cve_dataset(records)
+    cache_path = data_dir / "nvd.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "name": dataset.name,
+                "documents": [
+                    {"doc_id": doc.doc_id, "text": doc.text} for doc in dataset.documents
+                ],
+                "queries": [{"query_id": q.query_id, "text": q.text} for q in dataset.queries],
+                "qrels": {qid: sorted(ids) for qid, ids in dataset.qrels.items()},
+            }
+        )
+    )
+    return dataset
+
+
+def load_cve_corpus(data_dir: str | Path = "data") -> RetrievalDataset:
+    """Load the cached NVD CVE corpus.
+
+    Raises:
+        FileNotFoundError: If ``nvd.json`` was never downloaded.
+    """
+    cache_path = Path(data_dir) / "nvd.json"
+    if not cache_path.exists():
+        raise FileNotFoundError(
+            f"CVE cache not found at {cache_path}. Run `retrieval-lab download-cve` first."
+        )
+    return _dataset_from_json(json.loads(cache_path.read_text()))

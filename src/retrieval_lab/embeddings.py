@@ -98,7 +98,15 @@ class SentenceTransformerProvider(EmbeddingProvider):
             ) from exc
         self.model_name = model_name
         self._model = SentenceTransformer(model_name)
-        self._dimension = int(self._model.get_sentence_embedding_dimension())
+        # `get_embedding_dimension` is the current name; fall back to the
+        # legacy `get_sentence_embedding_dimension` on older releases.
+        get_dim = getattr(self._model, "get_embedding_dimension", None)
+        dimension = (
+            get_dim() if callable(get_dim) else self._model.get_sentence_embedding_dimension()
+        )
+        if dimension is None:
+            raise RuntimeError(f"Could not determine embedding dimension for {model_name}")
+        self._dimension = dimension
 
     @property
     def dimension(self) -> int:
