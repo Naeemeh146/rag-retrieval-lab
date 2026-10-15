@@ -1,0 +1,29 @@
+# Hybrid retrieval + cross-encoder reranking (stage 2).
+# NOTE: downloads the ms-marco-MiniLM-L-6-v2 weights on first use (~90 MB).
+# Requires `pip install "retrieval-lab[models]"` and network access.
+name: hybrid-rerank
+chunker:
+  name: recursive
+  chunk_size: 200
+  chunk_overlap: 50
+embedding:
+  provider: sentence-transformer
+  model: all-MiniLM-L6-v2
+  dimension: 384
+bm25:
+  enabled: true
+  k1: 1.5
+  b: 0.75
+  top_k: 50
+dense:
+  enabled: true
+  top_k: 50
+fusion:
+  method: rrf
+  k: 60
+  top_k: 50
+rerank:
+  enabled: true
+  provider: cross-encoder
+  model: cross-encoder/ms-marco-MiniLM-L-6-v2
+  top_n: 10

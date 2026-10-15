@@ -1,0 +1,30 @@
+# This CITATION.cff file was generated following the Citation File Format (CFF) v1.2.0.
+# See https://citation-file-format.github.io/ for details.
+cff-version: 1.2.0
+title: "rag-retrieval-lab: Two-Stage RAG Retrieval Lab"
+version: 0.1.0
+date-released: 2026-10-15
+authors:
+  - given-names: Naeemeh
+    family-names: Yadollahpour
+license: MIT
+repository-code: "https://github.com/Naeemeh146/rag-retrieval-lab"
+keywords:
+  - retrieval-augmented-generation
+  - two-stage-retrieval
+  - hybrid-search
+  - bm25
+  - dense-retrieval
+  - reciprocal-rank-fusion
+  - cross-encoder-reranking
+  - chunking-strategies
+  - retrieval-evaluation
+  - recall
+  - mrr
+  - ndcg
+  - information-retrieval
+abstract: >-
+  A hands-on laboratory for two-stage retrieval in RAG systems: hybrid
+  BM25 + dense search fused with Reciprocal Rank Fusion, cross-encoder
+  reranking, multiple chunking strategies, and offline benchmarks reporting
+  recall@k, MRR@k, and nDCG@k.
