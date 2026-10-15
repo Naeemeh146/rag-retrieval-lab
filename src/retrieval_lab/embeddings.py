@@ -72,7 +72,8 @@ class DeterministicEmbeddingProvider(EmbeddingProvider):
                 vectors[row, index] += 1.0
         norms = np.linalg.norm(vectors, axis=1, keepdims=True)
         norms[norms == 0.0] = 1.0
-        return vectors / norms
+        result: np.ndarray = vectors / norms
+        return result
 
 
 class SentenceTransformerProvider(EmbeddingProvider):
@@ -168,7 +169,8 @@ class CohereProvider(EmbeddingProvider):
         vectors = np.asarray(raw, dtype=np.float64)
         norms = np.linalg.norm(vectors, axis=1, keepdims=True)
         norms[norms == 0.0] = 1.0
-        return vectors / norms
+        result: np.ndarray = vectors / norms
+        return result
 
 
 def build_embedding_provider(name: str, model: str = "", dimension: int = 384) -> EmbeddingProvider:
